@@ -139,6 +139,15 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(entry["properties"]["ipAddress"], "10.0.0.1")
         self.assertEqual(entry["properties"]["virtualNetwork"]["id"], VNET)
 
+    def test_subnet_backend_needs_only_subnet_reference(self):
+        subnet = VNET + "/subnets/workers"
+        sdk = NetworkManagementClient(Mock(), "00000000-0000-0000-0000-000000000000")
+        planned = pool(plan_addresses([], {"10.0.0.1"}, VNET, subnet))
+        entry = sdk._serialize.body(planned, "BackendAddressPool")[
+            "properties"]["loadBalancerBackendAddresses"][0]["properties"]
+        self.assertEqual(entry["subnet"]["id"], subnet)
+        self.assertNotIn("virtualNetwork", entry)
+
     def test_reject_nic_and_vnet_mismatch(self):
         ops = Mock()
         ops.get.return_value = pool(nic=[Obj(id="nic")])

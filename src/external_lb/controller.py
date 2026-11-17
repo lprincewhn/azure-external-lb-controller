@@ -33,6 +33,7 @@ class Settings:
     pool: str
     vnet_id: str
     interval: int
+    subnet_id: str | None = None
 
     @classmethod
     def from_env(cls):
@@ -53,7 +54,10 @@ class Settings:
             raise ValueError("RECONCILE_INTERVAL_SECONDS must be an integer") from exc
         if interval < 1:
             raise ValueError("RECONCILE_INTERVAL_SECONDS must be positive")
-        return cls(*values, interval)
+        subnet_id = os.environ.get("AZURE_BACKEND_SUBNET_ID", "").strip() or None
+        if subnet_id and not subnet_id.lower().startswith(values[4].lower().rstrip("/") + "/subnets/"):
+            raise ValueError("AZURE_BACKEND_SUBNET_ID must be a subnet of AZURE_VNET_RESOURCE_ID")
+        return cls(*values, interval, subnet_id)
 
 
 def managed_name(ip):
@@ -102,7 +106,7 @@ def desired_addresses(services, slices):
     return addresses
 
 
-def plan_addresses(existing, desired, vnet_id):
+def plan_addresses(existing, desired, vnet_id, subnet_id=None):
     kept = []
     present = set()
     seen_names = set()
@@ -125,6 +129,11 @@ def plan_addresses(existing, desired, vnet_id):
                 and address.virtual_network.id.lower() != vnet_id.lower()
             ):
                 raise ValueError(f"Managed backend address has unexpected VNet: {name}")
+            if (
+                subnet_id and address.subnet and address.subnet.id
+                and address.subnet.id.lower() != subnet_id.lower()
+            ):
+                raise ValueError(f"Managed backend address has unexpected subnet: {name}")
             if ip in desired:
                 kept.append(address)
         else:
@@ -134,7 +143,10 @@ def plan_addresses(existing, desired, vnet_id):
             LoadBalancerBackendAddress(
                 name=managed_name(ip),
                 ip_address=ip,
-                virtual_network=SubResource(id=vnet_id),
+                **(
+                    {"subnet": SubResource(id=subnet_id)}
+                    if subnet_id else {"virtual_network": SubResource(id=vnet_id)}
+                ),
             )
         )
     return kept
@@ -151,7 +163,7 @@ def sync_pool(operations, settings, addresses):
         if pool.virtual_network.id.lower() != settings.vnet_id.lower():
             raise ValueError("Configured VNet does not match the backend pool VNet")
     existing = pool.load_balancer_backend_addresses or []
-    planned = plan_addresses(existing, addresses, settings.vnet_id)
+    planned = plan_addresses(existing, addresses, settings.vnet_id, settings.subnet_id)
     if [(a.name, a.ip_address) for a in planned] == [
         (a.name, a.ip_address) for a in existing
     ]:
@@ -241,7 +253,8 @@ def run(core, discovery, operations, settings, stop):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.WARNING)
+    LOG.setLevel(logging.INFO)
     settings = Settings.from_env()
     try:
         config.load_incluster_config()
