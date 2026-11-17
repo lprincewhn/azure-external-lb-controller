@@ -2,12 +2,14 @@
 
 import hashlib
 import ipaddress
+import json
 import logging
 import os
 import signal
 import threading
 from dataclasses import dataclass
 from time import monotonic
+from types import SimpleNamespace
 
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.network import NetworkManagementClient
@@ -160,16 +162,49 @@ def sync_pool(operations, settings, addresses):
     return True
 
 
+def list_endpoint_slices(discovery):
+    response = discovery.list_endpoint_slice_for_all_namespaces(_preload_content=False)
+    payload = json.loads(response.data)
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise ValueError("Invalid EndpointSlice list response")
+    slices = []
+    for item in payload["items"]:
+        metadata = item["metadata"]
+        endpoints = []
+        for endpoint in item.get("endpoints") or []:
+            conditions = endpoint.get("conditions") or {}
+            target = endpoint.get("targetRef") or {}
+            endpoints.append(SimpleNamespace(
+                addresses=endpoint["addresses"],
+                conditions=SimpleNamespace(
+                    ready=conditions.get("ready"),
+                    serving=conditions.get("serving"),
+                    terminating=conditions.get("terminating"),
+                ),
+                target_ref=SimpleNamespace(
+                    kind=target.get("kind"), namespace=target.get("namespace")
+                ) if target else None,
+            ))
+        slices.append(SimpleNamespace(
+            address_type=item["addressType"],
+            metadata=SimpleNamespace(
+                namespace=metadata["namespace"], labels=metadata.get("labels")
+            ),
+            endpoints=endpoints,
+        ))
+    return slices
+
+
 def reconcile(core, discovery, operations, settings):
     services = core.list_service_for_all_namespaces().items
-    slices = discovery.list_endpoint_slice_for_all_namespaces().items
+    slices = list_endpoint_slices(discovery)
     addresses = desired_addresses(services, slices)
     return sync_pool(operations, settings, addresses)
 
 
-def watch_resource(method, changed, stop):
+def watch_resource(method, changed, stop, raw=False):
     while not stop.is_set():
-        watcher = watch.Watch()
+        watcher = watch.Watch(return_type="object" if raw else None)
         try:
             for _ in watcher.stream(method, timeout_seconds=30):
                 changed.set()
@@ -185,12 +220,12 @@ def watch_resource(method, changed, stop):
 
 def run(core, discovery, operations, settings, stop):
     changed = threading.Event()
-    for method in (
-        core.list_service_for_all_namespaces,
-        discovery.list_endpoint_slice_for_all_namespaces,
+    for method, raw in (
+        (core.list_service_for_all_namespaces, False),
+        (discovery.list_endpoint_slice_for_all_namespaces, True),
     ):
         threading.Thread(
-            target=watch_resource, args=(method, changed, stop), daemon=True
+            target=watch_resource, args=(method, changed, stop, raw), daemon=True
         ).start()
     deadline = 0.0
     while not stop.is_set():

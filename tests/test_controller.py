@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace as Obj
 from unittest.mock import Mock
@@ -13,6 +14,7 @@ from external_lb.controller import (
     Settings,
     desired_addresses,
     managed_name,
+    list_endpoint_slices,
     plan_addresses,
     reconcile,
     sync_pool,
@@ -156,12 +158,40 @@ class ReconcileTest(unittest.TestCase):
             reconcile(core, Mock(), ops, SETTINGS)
         ops.get.assert_not_called()
 
+    def test_null_endpoints_from_existing_slice_do_not_break_full_list(self):
+        core, discovery, ops = Mock(), Mock(), Mock()
+        core.list_service_for_all_namespaces.return_value.items = [service()]
+        discovery.list_endpoint_slice_for_all_namespaces.return_value.data = json.dumps({
+            "items": [
+                {"addressType": "IPv4", "metadata": {
+                    "namespace": "other", "labels": {"kubernetes.io/service-name": "arc"}
+                }, "endpoints": None},
+                {"addressType": "IPv4", "metadata": {
+                    "namespace": "default", "labels": {"kubernetes.io/service-name": "web"}
+                }, "endpoints": [{"addresses": ["10.0.0.2"], "targetRef": {"kind": "Pod"},
+                                 "conditions": {"ready": True}}]},
+            ]
+        }).encode()
+        self.assertEqual(
+            desired_addresses(core.list_service_for_all_namespaces.return_value.items,
+                              list_endpoint_slices(discovery)),
+            {"10.0.0.2"},
+        )
+        ops.get.return_value = pool()
+        self.assertTrue(reconcile(core, discovery, ops, SETTINGS))
+        discovery.list_endpoint_slice_for_all_namespaces.assert_called_with(
+            _preload_content=False
+        )
+
     def test_class_removal_clears_managed_address(self):
         core, discovery, ops = Mock(), Mock(), Mock()
         core.list_service_for_all_namespaces.return_value.items = [service(lb_class=None)]
-        discovery.list_endpoint_slice_for_all_namespaces.return_value.items = [
-            endpoint_slice(endpoints=[endpoint("10.0.0.1")])
-        ]
+        discovery.list_endpoint_slice_for_all_namespaces.return_value.data = json.dumps({
+            "items": [{"addressType": "IPv4", "metadata": {
+                "namespace": "default", "labels": {"kubernetes.io/service-name": "web"}
+            }, "endpoints": [{"addresses": ["10.0.0.1"], "targetRef": {"kind": "Pod"},
+                             "conditions": {"ready": True}}]}]
+        }).encode()
         ops.get.return_value = pool([address(managed_name("10.0.0.1"), "10.0.0.1")])
         self.assertTrue(reconcile(core, discovery, ops, SETTINGS))
         self.assertEqual(
