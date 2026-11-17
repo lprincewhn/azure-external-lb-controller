@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "azure-external-lb-controller"
+version = "0.1.0"
+description = "Synchronize Kubernetes ready Pod IPs into an Azure Standard LB backend pool"
+requires-python = ">=3.11"
+dependencies = [
+  "azure-identity>=1.20,<2",
+  "azure-mgmt-network>=28,<31",
+  "kubernetes>=31,<36",
+]
+
+[project.scripts]
+azure-external-lb-controller = "external_lb.controller:main"
+
+[project.optional-dependencies]
+test = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
